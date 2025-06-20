@@ -1,34 +1,44 @@
 import cv2
 import numpy as np
 
+# 图像预处理类
+# 用于处理摄像头捕获的原始图像，将其转换为二值图像，并提取出棋盘和棋格的轮廓。
+# 主要功能包括：
+# 1. 将彩色图像转换为灰度图像。
+# 2. 将灰度图像二值化。
+# 3. 进行形态学操作，如膨胀、闭操作、开操作、中值滤波、腐蚀等。
+# 4. 裁剪图像的中心区域，以专注于图像的主要部分。
+# 5. 在二值图中查找所有轮廓，并返回它们的外接矩形的四个顶点。
 class Pretreatment:
     # 类的构造函数，在创建类的新实例时自动调用。
-    # 参数：
-    #   cap: 从摄像头或视频文件捕获的视频流对象。
-    def __init__(self, cap):
-        # 将传入的视频流对象保存为类的属性。注意：当前版本中，该属性未在类方法中使用。
-        self.cap = cap
+    def __init__(self, x_ratio=0.5, y_ratio=1, 
+                 black_threshold=(0, 0, 0, 179, 255, 189), 
+                 red_thresholds=[(0, 100, 100, 10, 255, 255), (170, 100, 100, 180, 255, 255)]):
         # 定义一个3x3的结构元素（或称为核），用于形态学操作。
         # 形态学操作（如腐蚀、膨胀）使用这个核来处理图像的像素。
         self.kernel = np.ones((3, 3), np.uint8)
         # 设置图像裁剪的宽度比例。0.5表示保留中心50%的宽度。
-        self.x_ratio = 0.5
+        self.x_ratio = x_ratio
         # 设置图像裁剪的高度比例。1表示保留完整的100%的高度。
-        self.y_ratio = 1
+        self.y_ratio = y_ratio
+        
+        # 解析黑色阈值
+        self.lower_black = np.array([black_threshold[0], black_threshold[1], black_threshold[2]])
+        self.upper_black = np.array([black_threshold[3], black_threshold[4], black_threshold[5]])
+        # 存储红色阈值
+        self.red_thresholds = red_thresholds
         pass
 
     # 预处理图像，通过一系列操作来清洁图像，突出显示感兴趣的特征。
     # 参数：
     #   image: 需要处理的原始彩色图像。
     def preprocess(self, image):
-        # 步骤1: 将彩色图像转换为灰度图像。
-        # 灰度图像只有一个通道，简化了后续处理。
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # 步骤1: 将彩色图像转换为HSV图像。
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-        # 步骤2: 将灰度图像二值化。
-        # 像素值高于127的变为255（白色），低于或等于127的变为0（黑色）。
-        # THRESH_BINARY_INV 表示反向二值化，我们感兴趣的前景（比如黑色线条）会变成白色（255）。
-        ret, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY_INV)
+        # 步骤2: 根据黑色阈值进行颜色过滤，得到二值图像
+        binary = cv2.inRange(hsv, self.lower_black, self.upper_black)
+
 
         # --- 形态学操作，用于优化二值图像 ---
 
@@ -83,12 +93,25 @@ class Pretreatment:
         # 使用NumPy的切片功能裁剪图像，并返回裁剪后的部分。
         return image[y_start:y_end, x_start:x_end]
 
+    def thresholdHsv(self, image, thresholds):
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        # 检查传入的是单个阈值元组还是多个阈值元组的列表
+        if isinstance(thresholds[0], int):
+            thresholds = [thresholds]
+        
+        final_mask = np.zeros(image.shape[:2], dtype=np.uint8)
+        for t in thresholds:
+            lower = np.array([t[0], t[1], t[2]])
+            upper = np.array([t[3], t[4], t[5]])
+            mask = cv2.inRange(hsv, lower, upper)
+            final_mask = cv2.bitwise_or(final_mask, mask)
+            
+        return final_mask
 
     # 在二值图中查找所有轮廓，并返回它们的外接矩形的四个顶点。
     # 参数：
-    #   image: 经过预处理的二值图。
+    # image: 经过预处理的二值图。
     def get_rect_contour(self, image):
-
         # 查找图像中的轮廓。
         # cv2.RETR_EXTERNAL: 只检测最外层的轮廓。
         # cv2.CHAIN_APPROX_SIMPLE: 压缩水平、垂直和对角线段，只保留它们的端点。
@@ -148,7 +171,7 @@ class Pretreatment:
     # 返回:
     #   processed_frame: 经过处理后，绘制了轮廓的帧。
     #   grid_contours: 检测到的棋格轮廓列表。
-    def get_grid(self, frame):
+    def get_grid(self, frame, draw_visuals=True):
         # -- 识别黑色棋盘  --
         # 创建原始帧的俩个副本，一个用于棋盘，一个用于棋格
         # 这样做可以保留原始的、未被修改的 `frame`，以便在最后显示清晰的结果。
@@ -156,8 +179,8 @@ class Pretreatment:
         frame_for_processing_white = frame.copy()
         
         # 裁剪图像副本，以专注于中心区域，减少背景干扰。
-        cropped_image_black = self.crop(frame_for_processing_black, x_ratio=0.5, y_ratio=1)
-        cropped_image_white = self.crop(frame_for_processing_white, x_ratio=0.5, y_ratio=1)
+        cropped_image_black = self.crop(frame_for_processing_black, self.x_ratio, self.y_ratio)
+        cropped_image_white = self.crop(frame_for_processing_white, self.x_ratio, self.y_ratio)
         # 也裁剪原始的显示帧，以确保处理区域和显示区域大小一致。
         processed_frame = self.crop(frame.copy())
         
@@ -179,63 +202,66 @@ class Pretreatment:
         # -- 识别 黑色棋盘中的 白色 棋格  --
         # 只有在成功找到最大轮廓的情况下，才执行后续操作。
         if max_contour_black is not None:
-            # 在结果图上用红色绘制最大轮廓（棋盘）
-            cv2.drawContours(processed_frame, [max_contour_black], -1, (0, 0, 255), 3) # 红色，粗线条
-            # 在最大轮廓的四个顶点上画蓝色的圆
-            for point in max_contour_black:
-                cv2.circle(processed_frame, tuple(point), 5, (255, 0, 0), -1) # 蓝色实心圆
+            if draw_visuals:
+                # 在结果图上用红色绘制最大轮廓（棋盘）
+                cv2.drawContours(processed_frame, [max_contour_black], -1, (0, 0, 255), 3) # 红色，粗线条
+                # 在最大轮廓的四个顶点上画蓝色的圆
+                for point in max_contour_black:
+                    cv2.circle(processed_frame, tuple(point), 5, (255, 0, 0), -1) # 蓝色实心圆
 
-            # 获取最大轮廓的边界框 (x, y, w, h)，这个区域就是我们的"感兴趣区域"(ROI)。
-            # ROI 通常是棋盘本身。
-            roi_black = self.get_contour_size(max_contour_black)
+            # 创建一个与裁剪图像同样大小的黑色掩码
+            mask = np.zeros(cropped_image_white.shape[:2], dtype=np.uint8)
+            # 在掩码上将最大轮廓（棋盘）区域画成白色，并填充
+            cv2.drawContours(mask, [max_contour_black], -1, 255, -1)
 
-            # 确保ROI的宽度和高度都大于0，以避免无效的切片操作。
-            if roi_black[2] > 0 and roi_black[3] > 0:
-                # 从原始的、未处理的白棋格图像副本中，提取出棋盘ROI区域
-                roi_for_white_grid = cropped_image_white[roi_black[1]:roi_black[1]+roi_black[3], roi_black[0]:roi_black[0]+roi_black[2]]
+            # 对掩码进行腐蚀操作，稍微向内收缩，以排除棋盘边缘的干扰
+            # 腐蚀核的大小决定了收缩的程度，可以根据实际情况调整
+            erosion_kernel = np.ones((15, 15), np.uint8)
+            mask = cv2.erode(mask, erosion_kernel, iterations=1)
+
+            # 使用掩码从原始彩色图像中提取出棋盘的精确区域
+            roi_for_white_grid = cv2.bitwise_and(cropped_image_white, cropped_image_white, mask=mask)
+
+
+            # 确保提取的ROI不为空
+            if roi_for_white_grid.size > 0:
+                # 对这个ROI（棋盘区域）进行预处理，以寻找内部的棋格。
+                # 'preprocess'会使黑色背景（棋盘）变白，而白色物体（棋格）变黑。
+                binary_roi_white = self.preprocess(roi_for_white_grid)
                 
-                # 确保提取的ROI不为空
-                if roi_for_white_grid.size > 0:
-                    # 对这个ROI（棋盘区域）进行预处理，以寻找内部的棋格。
-                    # 'preprocess'会使黑色背景（棋盘）变白，而白色物体（棋格）变黑。
-                    binary_roi_white = self.preprocess(roi_for_white_grid)
-                    
-                    # 为了能用findContours找到棋格，我们需要让棋格成为白色物体。
-                    # 因此，我们反转二值图像，使棋格变白，背景变黑。
-                    # cv2.imshow("BI", binary_roi_white) # 显示反转前的图像 (当前棋格是黑的)
-                    binary_roi_white = cv2.bitwise_not(binary_roi_white)
-                    # cv2.imshow("CIMG", binary_roi_white) # 显示反转后的图像 (当前棋格是白的，背景是黑的)
+                # 为了能用findContours找到棋格，我们需要让棋格成为白色物体。
+                # 因此，我们反转二值图像，使棋格变白，背景变黑。
+                # cv2.imshow("BI", binary_roi_white) # 显示反转前的图像 (当前棋格是黑的)
+                binary_roi_white = cv2.bitwise_not(binary_roi_white)
+                # cv2.imshow("CIMG", binary_roi_white) # 显示反转后的图像 (当前棋格是白的，背景是黑的)
 
-                    # 现在，在处理过的ROI中寻找轮廓，这些轮廓对应着棋格。
-                    list_of_box_points_white = self.get_rect_contour(binary_roi_white)
+                # 现在，在处理过的ROI中寻找轮廓，这些轮廓对应着棋格。
+                list_of_box_points_white = self.get_rect_contour(binary_roi_white)
 
-                    # 如果在ROI中找到了轮廓（棋格）。
-                    if list_of_box_points_white:
-                        # 遍历ROI中的每一个轮廓。
-                        for contour in list_of_box_points_white:
-                            # 计算轮廓的面积
-                            mianji=cv2.contourArea(contour)
-                            # 根据面积筛选轮廓，以排除不可能是棋格的轮廓。
-                            # 如果轮廓面积大于棋盘面积的90%（可能是整个棋盘的边框），或者小于5%（可能是噪声或线条），则忽略它。
-                            if mianji > max_area_black * 0.9 or mianji < max_area_black * 0.05:
-                                continue
-                            
-                            # 将ROI内部的轮廓坐标转换回原始帧（裁剪后）的坐标系。
-                            # 这是通过将轮廓的每个点加上ROI的左上角坐标 (roi_black[0], roi_black[1]) 实现的。
-                            contour_in_frame = contour + (roi_black[0], roi_black[1])
-                            
-                            grid_contours.append(contour_in_frame)
-                            
+                # 如果在ROI中找到了轮廓（棋格）。
+                if list_of_box_points_white:
+                    # 遍历ROI中的每一个轮廓。
+                    for contour in list_of_box_points_white:
+                        # 计算轮廓的面积
+                        mianji=cv2.contourArea(contour)
+                        # 根据面积筛选轮廓，以排除不可能是棋格的轮廓。
+                        # 如果轮廓面积大于棋盘面积的90%（可能是整个棋盘的边框），或者小于2%（可能是噪声或线条），则忽略它。
+                        if mianji > max_area_black * 0.9 or mianji < max_area_black * 0.02:
+                            continue
+                        
+                        grid_contours.append(contour)
+                        
+                        if draw_visuals:
                             # 在原始的彩色帧上把棋格的轮廓画出来，用绿色、宽度为2的线条。
-                            cv2.drawContours(processed_frame, [contour_in_frame], -1, (0, 255, 0), 2)
+                            cv2.drawContours(processed_frame, [contour], -1, (0, 255, 0), 2)
                             # 在每个棋格的四个顶点上画黄色的圆
-                            for point in contour_in_frame:
+                            for point in contour:
                                 cv2.circle(processed_frame, tuple(point), 5, (0, 255, 255), -1) # 黄色实心圆
 
-                    # 显示提取出的ROI图像（一个小的黑白图像），用于调试。
-                    cv2.imshow("ROI Image", binary_roi_white)
+                # 显示提取出的ROI图像（一个小的黑白图像），用于调试。
+                cv2.imshow("ROI Image", binary_roi_white)
         
-        return processed_frame, grid_contours
+        return  grid_contours
 
 
 # 这是一个标准的Python入口点。
@@ -246,7 +272,7 @@ if __name__ == "__main__":
     cap = cv2.VideoCapture(1)
     # 在主循环开始前，只创建一个Pretreatment类的实例。
     # 这样可以避免在每次循环中重复创建对象，提高效率。
-    pretreatment = Pretreatment(cap)
+    pretreatment = Pretreatment(x_ratio=0.5, y_ratio=1)
     
     # 开始一个无限循环，用于连续处理视频的每一帧。
     while True:
@@ -258,11 +284,21 @@ if __name__ == "__main__":
             print("错误：无法获取帧")
             break
 
-        # 调用封装好的方法来处理帧
-        processed_frame, grids = pretreatment.get_grid(frame)
+        # 调用封装好的方法来处理帧，但不让它自己画图
+        # 如果需要看到棋盘轮廓等所有细节，可以将 draw_visuals 设置为 True
+        grids = pretreatment.get_grid(frame, draw_visuals=False)
+        cropped_frame = pretreatment.crop(frame, pretreatment.x_ratio, pretreatment.y_ratio)
+        # 在主函数中根据返回的数据手动绘制，以验证数据正确性
+        if grids:
+            # 绘制所有棋格的轮廓
+            cv2.drawContours(cropped_frame, grids, -1, (0, 255, 0), 2) # 绿色
+            # 绘制所有棋格的顶点
+            for contour in grids:
+                for point in contour:
+                    cv2.circle(cropped_frame, tuple(point), 5, (0, 255, 255), -1) # 黄色
         
         # 在窗口中显示最终处理后带有标记的彩色图像。
-        cv2.imshow("Result", processed_frame)
+        cv2.imshow("Result", cropped_frame)
         
         # 可以在这里添加使用`grids`列表的逻辑
         if grids:

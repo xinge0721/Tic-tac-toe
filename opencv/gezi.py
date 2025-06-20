@@ -2,12 +2,13 @@ import cv2
 import numpy as np
 import os
 
-def generate_a4_grid_image(output_filename="a4_grid.png"):
+def generate_a4_grid_image(output_filename="a4_grid.png", background_color_bgr=(0, 0, 255)):
     """
     生成一个A4大小的图片，中间有一个3x3的九宫格。
 
     Args:
         output_filename (str): 输出图片的文件名。
+        background_color_bgr (tuple): 背景颜色，BGR格式。
     """
     # --- 1. 定义常量 ---
     DPI = 300
@@ -27,10 +28,9 @@ def generate_a4_grid_image(output_filename="a4_grid.png"):
     cell_size_px = int(CELL_SIZE_MM * PX_PER_MM)
     line_width_px = int(LINE_WIDTH_MM * PX_PER_MM)
 
-    # --- 3. 创建白色背景的A4图片 ---
+    # --- 3. 创建指定颜色的背景A4图片 ---
     # OpenCV 使用 (height, width, channels) 的顺序
-    # 创建一个白色 (255, 255, 255) 的三通道图像
-    image = np.ones((a4_height_px, a4_width_px, 3), dtype=np.uint8) * 255
+    image = np.full((a4_height_px, a4_width_px, 3), background_color_bgr, dtype=np.uint8)
 
     # --- 4. 计算九宫格的尺寸和位置 ---
     grid_total_width_px = 3 * cell_size_px + 4 * line_width_px
@@ -63,4 +63,9 @@ def generate_a4_grid_image(output_filename="a4_grid.png"):
     print(f"图片已保存到: {os.path.abspath(output_filename)}")
 
 if __name__ == '__main__':
-    generate_a4_grid_image()
+    # 生成红色背景的图片
+    generate_a4_grid_image("a4_grid.png", background_color_bgr=(0, 0, 255))
+    # 生成蓝色背景的图片
+    generate_a4_grid_image("a4_grid_blue.png", background_color_bgr=(255, 0, 0))
+    # 生成绿色背景的图片
+    generate_a4_grid_image("a4_grid_green.png", background_color_bgr=(0, 255, 0))
