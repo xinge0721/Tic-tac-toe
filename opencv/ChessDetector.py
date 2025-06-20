@@ -2,6 +2,7 @@ import pretreatment
 import cv2
 import numpy as np
 import time
+import serial_test
 
 # 状态常量
 EMPTY = 0  # 空格子
@@ -35,6 +36,19 @@ class ChessDetector:
         # 黑色棋子HSV阈值 (低亮度)
         self.black_piece_threshold = (4, 12, 49, 162, 44, 209)
 
+        # 上一回合落子方
+        self.last_move_color = None
+
+        # 初始化串口通信
+        try:
+            print("\n--- 初始化串口通信 ---")
+            self.communicator = serial_test.SerialCommunicator()
+            if not self.communicator.ser:
+                print("警告: 串口未连接，将无法发送数据。")
+        except Exception as e:
+            print(f"初始化串口失败: {e}")
+            self.communicator = None
+
     # 初始化棋盘
     def init(self, frame):
         """
@@ -46,7 +60,7 @@ class ChessDetector:
             self.pretreatment = pretreatment.Pretreatment(
                 x_ratio=0.5, 
                 y_ratio=1,
-                black_threshold=(0, 0, 0, 179, 255, 189)
+                black_threshold=(143, 105, 159, 179, 255, 255)
             )
 
         # 识别格子
@@ -228,8 +242,6 @@ class ChessDetector:
         # 记录出现的格子
         appeared = []
 
-        
-
         for i in range(9):
             # 如果之前有子，现在变为空，则记录为"消失"
             if self.prev_state[i] != EMPTY and self.current_state[i] == EMPTY:
@@ -262,7 +274,6 @@ class ChessDetector:
         # 2. 检测当前帧的空格子
         self.detect_empty_grids(cropped_frame)
 
-        
         # 3. 检测是否有棋子被移动或新落子
         move_from, move_to = self.detect_moved_pieces()
         # 4. 更新棋盘状态
@@ -272,22 +283,34 @@ class ChessDetector:
             pass
         # 如果move_to存在，而move_from不存在，则认为新落子
         elif move_to is not None and move_from is None:
-            # 首先判断是否是重复落子，即判断颜色是否相同
+            # 首先判断颜色
             color = self.detect_piece_color(cropped_frame, move_to)
             if color == HUMAN:
-                print("检测到人类落子")
+                print(f"检测到人类落子在格子 {move_to}")
+                # 通过串口发送落子位置
+                if self.communicator and self.communicator.ser:
+                    # 发送一个数组, 例如: [命令, 数据]
+                    # 命令 0x01 代表人类落子
+                    # 数据 move_to + 1 代表棋盘位置 (1-9)
+                    command_array = [0x01, move_to + 1]
+                    print(f"准备通过串口发送数据: {command_array}")
+                    self.communicator.send_data(command_array)
             elif color == ROBOT:
-                print("检测到机器人落子")
-            pass
+                print(f"检测到机器人落子在格子 {move_to}")
+            # 如果上回合有落子，则开始判断是否重复落子
+            if self.last_move_color:
+                # 如果上回合落子方和当前落子方相同，则认为重复落子
+                if self.last_move_color == color:
+                    print("检测到重复落子")
+                # 反之则为正常落子
+                else:
+                    self.last_move_color = color
+            # 如果上回合没有落子，则说明这是第一次落子，直接记录落子方，不做过多处理
+            else:
+                self.last_move_color = color
         # 如果都没有就说明现在什么也没发生
         else:
-            # 什么都不做
-            pass
-
-        
-        
-
-
+            pass 
 
 
 if __name__ == "__main__":
@@ -328,6 +351,16 @@ if __name__ == "__main__":
         if time.time() >= pause_until:
             # 更新棋盘状态，这是核心处理步骤
             detector.update_board_state(cropped_frame)
+
+        # 尝试从串口接收数据
+        if detector.communicator and detector.communicator.ser:
+            # 这个调用是非阻塞的，所以不会影响主循环的速度
+            received_data = detector.communicator.receive_data()
+            if received_data:
+                print(f"主循环接收到单片机返回的数据: {received_data}")
+                # 在这里可以添加对 received_data 的处理逻辑
+                # 例如: if received_data == [0x02, 0x05]: 
+                #          print("机器人已在位置5落子")
         
         display_frame = cropped_frame.copy()
 
@@ -338,57 +371,6 @@ if __name__ == "__main__":
             (h, w) = display_frame.shape[:2]
             cv2.putText(display_frame, text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-        # # --- 调试代码开始 ---
-        # # 1. 在控制台打印棋盘状态
-        # print(f"当前状态: {detector.current_state}")
-        
-        # # 2. 准备一个用于显示颜色掩码的调试窗口
-        # hsv_debug_frame = np.zeros_like(display_frame)
-
-        # # 3. 可视化每个格子的检测结果
-        # for i in range(9):
-        #     state = detector.current_state[i]
-        #     center = detector.grid_centers[i]
-        #     contour = detector.grid_rois[i]
-            
-        #     # 在主窗口上标记状态
-        #     if state == EMPTY:
-        #         # 用紫色框标记被识别为空的格子
-        #         cv2.drawContours(display_frame, [contour], -1, (255, 0, 255), 2)
-        #     elif state == HUMAN:
-        #         cv2.putText(display_frame, "Human", center, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        #     elif state == ROBOT:
-        #         cv2.putText(display_frame, "Robot", center, cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-            
-        #     # 在调试窗口上显示颜色检测的掩码
-        #     if contour is not None and state != EMPTY:
-        #         x, y, w, h = cv2.boundingRect(contour)
-        #         roi = cropped_frame[y:y+h, x:x+w]
-        #         hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-
-        #         # 白色掩码
-        #         lower_white = np.array(detector.white_piece_threshold[:3])
-        #         upper_white = np.array(detector.white_piece_threshold[3:])
-        #         white_mask = cv2.inRange(hsv_roi, lower_white, upper_white)
-
-        #         # 黑色掩码
-        #         lower_black = np.array(detector.black_piece_threshold[:3])
-        #         upper_black = np.array(detector.black_piece_threshold[3:])
-        #         black_mask = cv2.inRange(hsv_roi, lower_black, upper_black)
-                
-        #         # 合并黑白掩码用于显示
-        #         combined_mask = cv2.bitwise_or(white_mask, black_mask)
-        #         colored_mask = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
-
-        #         # 将掩码绘制到调试窗口的对应位置
-        #         if hsv_debug_frame[y:y+h, x:x+w].shape == colored_mask.shape:
-        #             hsv_debug_frame[y:y+h, x:x+w] = colored_mask
-        
-        # # 显示调试窗口
-        # cv2.imshow("Color Masks", hsv_debug_frame)
-        # # --- 调试代码结束 ---
-
-        # 显示带有标记的视频帧
         cv2.imshow("检测结果", display_frame)
 
         # 刷新屏幕
