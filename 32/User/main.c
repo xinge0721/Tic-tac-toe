@@ -17,63 +17,129 @@ float TargetPositions[NUM_SERVOS] = {3000, 3000, 3000, 3000, 3000, 3000}; // 舵
 unsigned char Send_Count; //串口需要发送的数据个数
 
 /**
+  * @brief  初始化与PA5引脚连接的按键
+  * @note   此按键用于在舵机测试期间提供紧急停止功能。
+  *         PA5配置为上拉输入模式，当按键按下时，引脚电平为低。
+  * @param  无
+  * @retval 无
+  */
+void Key_Init(void)
+{
+	// 1. 开启GPIOA的时钟
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA, ENABLE);
+	
+	// 2. 配置GPIO初始化结构体
+	GPIO_InitTypeDef GPIO_InitStructure;
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_5;          // 选择引脚5
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU;      // 配置为上拉输入
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;  // 设置I/O口速度
+	
+	// 3. 初始化GPIOA的引脚5
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+}
+
+/**
   * 函数：main
   * 描述：主函数入口
   */
 int main(void)
 {
-	MY_NVIC_PriorityGroupConfig(2); //=====中断分组
-	Stm32_Clock_Init(9);    // 系统时钟初始化，参数9表示9倍频，配置为72MHz
-	delay_init();		    		//延时初始化，72MHz系统时钟
-	Serial_Init(115200);		//串口初始化
-	Serial3_Init(115200);		//串口初始化
-	Servo_PWM_Init();			  //数字舵机初始化
+	/* =========== 初始化部分 =========== */
+	MY_NVIC_PriorityGroupConfig(2); // 配置NVIC中断分组
+	Stm32_Clock_Init(9);    // 初始化系统时钟至72MHz
+	delay_init();		    // 初始化延时函数
+	Key_Init();             // 初始化按键 (PA5)
+	Serial_Init(115200);	// 初始化串口1
+	Serial3_Init(115200);	// 初始化串口3
+	Servo_PWM_Init();		// 初始化舵机PWM输出
 	PID_InitAll();          // 初始化所有PID控制器
+	TIM2_Init();            // 初始化TIM2定时器，用于PID控制循环
+	OLED_Init();            // 初始化OLED显示屏
 
+	/* =========== 舵机极限角度测试部分 =========== */
+	
+	// 定义用于测试的脉冲宽度值数组: {最小值, 中间值, 最大值}
+	uint16_t test_pulses[] = {2000, 3000, 4000};
+	// 计算测试点的数量
+	int num_pulses = sizeof(test_pulses) / sizeof(test_pulses[0]);
+	// 测试停止标志，当按键按下时，此标志置1
+	int stop_test = 0;
 
-	TIM2_Init();
-	OLED_Init();
+	// 在OLED上显示测试开始信息
+	OLED_ShowString(0, 0, "Starting test...");
+	OLED_Refresh_Gram();
+	delay_ms(1000); // 延时1秒，让用户准备
+	
+	// 外层循环：遍历所有舵机
+	for (int i = 0; i < NUM_SERVOS; i++)
+	{
+		// 内层循环：使用不同的脉冲宽度测试当前舵机
+		for (int j = 0; j < num_pulses; j++)
+		{
+			// 清屏并显示当前测试信息
+			OLED_Clear();
+			OLED_ShowString(0, 0, "Servo:");
+			OLED_ShowNumber(0, 6, i + 1, 1); // 显示舵机编号 (1-6)
+			OLED_ShowString(1, 0, "Pulse:");
+			OLED_ShowNumber(1, 6, test_pulses[j], 4); // 显示当前测试脉宽
+			OLED_Refresh_Gram();
 
+			// 设置当前舵机的目标位置为测试脉宽
+			TargetPositions[i] = test_pulses[j];
+
+			// 延时2秒，同时检测按键是否按下作为紧急停止
+			for (int k = 0; k < 200; k++)
+			{
+				// 读取PA5引脚的电平，如果为0 (按键按下)
+				if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_5) == 0)
+				{
+					stop_test = 1; // 设置停止标志
+					break;         // 跳出延时循环
+				}
+				delay_ms(10);
+			}
+
+			// 如果已觸發停止，則跳出内层循环
+			if (stop_test) break;
+		}
+		// 每个舵机测试完毕后，将其复位到中间位置
+		TargetPositions[i] = 3000;
+		// 如果已觸發停止，則跳出外层循环
+		if (stop_test) break;
+	}
+
+	/* =========== 测试结束处理 =========== */
+	
+	// 清屏并根据测试是否被中断显示不同信息
+	OLED_Clear();
+	if (stop_test)
+	{
+		OLED_ShowString(0, 0, "Test stopped!");
+	}
+	else
+	{
+		OLED_ShowString(0, 0, "Test finished!");
+	}
+	OLED_Refresh_Gram();
+
+	// 为安全起见，将所有舵机都设置回中间位置
+	for (int i = 0; i < NUM_SERVOS; i++)
+	{
+		TargetPositions[i] = 3000;
+	}
+
+	// 测试完成后，程序进入无限循环，保持舵机在中间位置
 	while (1)
 	{
-
-		delay_ms(10);
-		OLED_ShowString(0,0,"X_pulse:");
-		OLED_ShowString(0,1,"Y_pulse:");
-		OLED_ShowNumber(9,0,x_pulse,5);
-		OLED_ShowNumber(9,1,y_pulse,5);
-//		delay_ms(500);
-//		SetPulse(x_pulse,1);
-//		x_pulse+=100;
-//		delay_ms(500);
-		
-		OLED_Refresh_Gram();	//非常重要，若是不使用，单纯使用OLED_ShowString()，则不会显示内容
-//		delay_ms(10);
-//		DataScope_Get_Channel_Data(x_pulse*0.01, 1 );//目标数据
-//		DataScope_Get_Channel_Data(Position1*0.01, 2 );//当前左轮数据
-//		DataScope_Get_Channel_Data(Position2*0.01, 3 );//当前右轮数据
-//		DataScope_Get_Channel_Data(Velocity1, 4 );//当前右轮数据
-//		DataScope_Get_Channel_Data(Velocity2, 5);//当前右轮数据
-
-//			
-//		Send_Count = DataScope_Data_Generate(10);
-//		for(int j = 0 ; j < Send_Count; j++) 
-//		{
-//			Serial_SendByte( DataScope_OutPut_Buffer[j]); //发送到上位机
-//		}
-//		 delay_ms(50);
-		}
+		// 空闲状态
+	}
 }
-
-float xianzhi_pulse(float x)
-{
-	if(x<2000)
-		return 2000;
-	else if(x>4000)
-		return 4000;
-	else
-		return x;
-}
+// 限制脉宽范围
+// 最小脉宽
+#define MIN_PULSE 2000
+// 最大脉宽
+#define MAX_PULSE 4000
+#define xianzhi_pulse(x) ((x)<MIN_PULSE ? MIN_PULSE : ((x)>MAX_PULSE ? MAX_PULSE : (x)))
 
 
 void TIM2_IRQHandler(void)
@@ -86,10 +152,10 @@ void TIM2_IRQHandler(void)
         // 你需要为其余舵机 (3-6) 提供目标位置的更新逻辑
         TargetPositions[0] = xianzhi_pulse(x_pulse);
         TargetPositions[1] = xianzhi_pulse(y_pulse);
-        // TargetPositions[2] = ... ; // 例如: 从另一个传感器或串口获取
-        // TargetPositions[3] = ... ;
-        // TargetPositions[4] = ... ;
-        // TargetPositions[5] = ... ;
+        TargetPositions[2] = xianzhi_pulse(x_pulse);
+        TargetPositions[3] = xianzhi_pulse(y_pulse);
+        TargetPositions[4] = xianzhi_pulse(x_pulse);
+        TargetPositions[5] = xianzhi_pulse(y_pulse);
         
         // --- PID计算与舵机控制 ---
         // 循环计算并更新所有6个舵机的位置
