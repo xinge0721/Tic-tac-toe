@@ -11,7 +11,6 @@ OCCUPIED = 1  # 非空格子 (有棋子，但颜色未知)
 HUMAN = 2  # 人类棋子 (白色)
 ROBOT = 3  # 机器人棋子 (黑色)
 
-
 class ChessDetector:
     """
     一个集成了棋盘检测、棋子识别、状态更新和串口通信的综合类。
@@ -56,6 +55,9 @@ class ChessDetector:
 
         # 上一回合落子方
         self.last_move_color = None
+
+        # 等待机器人移动完成的标志位
+        self.waiting_for_robot_move = False
 
         # 初始化串口通信
         try:
@@ -120,7 +122,6 @@ class ChessDetector:
             # 所有信息处理完毕，初始化成功，返回 True
             return True
         
-
     # 检测空格子
     def detect_empty_grids(self, cropped_frame):
         """
@@ -345,7 +346,6 @@ class ChessDetector:
         # 场景3: 其他所有情况 (如无变化, 或多个棋子同时变化等)，都认为不是一次有效的移动或落子
         return None, None
 
-     
     def update_board_state(self, cropped_frame):
         # --- 步骤1: 状态更新准备 ---
         # 在检测新一帧之前，先将当前的状态保存为"上一帧状态"，用于后续比较
@@ -367,6 +367,7 @@ class ChessDetector:
         if move_from is not None and move_to is not None:
             # TODO: 此处为棋子移动的逻辑，例如用于处理悔棋或摆放错误后的修正
             # 目前的实现是直接忽略这种移动，可以根据需求补充逻辑
+
             print(f"检测到棋子被移动，从{move_from}到{move_to}，暂不处理。")
             pass
             
@@ -375,20 +376,23 @@ class ChessDetector:
             # --- B1: 识别落子颜色 ---
             # 对新落子的位置，调用颜色识别函数
             color = self.detect_piece_color(cropped_frame, move_to)
-            
+            # 将棋子挪回去
+            self.send_robot_move_command(move_from,move_to)
             # --- B2: 根据颜色执行操作 ---
             # 如果是人类落子（白色）
             if color == HUMAN:
                 print(f"检测到人类落子在格子 {move_to}")
-                # 如果串口通信正常，则发送落子信息给下位机
-                if self.communicator and self.communicator.ser:
-                    # 定义通信协议：[命令, 数据]
-                    # 命令 0x01 代表人类落子
-                    # 数据 move_to + 1 将格子索引(0-8)转换为棋盘位置(1-9)
-                    command_array = [0x01, move_to + 1]
-                    print(f"准备通过串口发送数据: {command_array}")
-                    # 调用串口对象的发送方法
-                    self.communicator.send_data(command_array)
+                # 旧的指令已被注释掉，替换为新的机器人移动指令
+                # if self.communicator and self.communicator.ser:
+                #     command_array = [0x01, move_to + 1]
+                #     print(f"准备通过串口发送数据: {command_array}")
+                #     self.communicator.send_data(command_array)
+                
+                # 在人类落子后，触发机器人移动
+                # 示例: 让机器人从棋框(10)取子，放到位置0
+                # TODO: 这里的 0 应该由您的游戏AI逻辑决定
+                print("触发机器人移动...")
+
             # 如果是机器人落子（黑色）
             elif color == ROBOT:
                 print(f"检测到机器人落子在格子 {move_to}")
@@ -403,6 +407,7 @@ class ChessDetector:
                     print("检测到重复落子")
                 # 如果颜色不同，则是正常的交替落子
                 else:
+                    self.send_robot_move_command(10,move_to)
                     # 更新"上一回合落子颜色"的记录
                     self.last_move_color = color
             # 如果 self.last_move_color 无记录（即这是游戏开始的第一次落子）
@@ -413,8 +418,28 @@ class ChessDetector:
         # 分支C: 无有效行为
         # 如果 move_from 和 move_to 都为 None，说明棋盘状态稳定，无事发生
         else:
-            # 不执行任何操作
-            pass 
+            pass
+
+    def send_robot_move_command(self, move_from, move_to):
+        """
+        发送移动棋子的指令到下位机，并暂停棋盘识别。
+        格式: 0xAA, move_from, move_to, 0x55
+        - move_from: 起始格子索引 (0-8)。10代表从棋框拿棋子。
+        - move_to: 目标格子索引 (0-8)。
+        """
+        if not (self.communicator and self.communicator.ser):
+            print("串口未连接，无法发送移动指令。")
+            return
+
+        # 索引10是特殊值，不需要+1. 0-8的索引需要转换为1-9.
+        from_index = 10 if move_from == 10 else move_from + 1
+        to_index = move_to + 1
+
+        command = [0xAA, from_index, to_index, 0x55]
+        print(f"发送移动指令: {command}")
+        self.communicator.send_data(command)
+        self.waiting_for_robot_move = True
+        print("指令已发送，正在等待机器人执行完成...")
 
 
 if __name__ == "__main__":
@@ -465,7 +490,16 @@ if __name__ == "__main__":
             received_data = detector.communicator.receive_data()
             if received_data:
                 print(f"主循环接收到单片机返回的数据: {received_data}")
-                # TODO: 在此添加对下位机返回数据的处理逻辑
+                # 检查是否为机器人移动完成的确认信号
+                # 成功标志位: [0xAA, 10, 10, 0x55]
+                if received_data == [0xAA, 10, 10, 0x55]:
+                    if detector.waiting_for_robot_move:
+                        print("接收到机器人移动完成信号，恢复棋盘识别。")
+                        detector.waiting_for_robot_move = False
+                    else:
+                        print("接收到移动完成信号，但当前不处于等待状态。")
+
+                # TODO: 在此添加对下位机返回数据的其他处理逻辑
                 # 例如，可以根据协议解析数据，确认机器人是否完成移动
                 # if received_data == [0x02, 0x05]: 
                 #     print("机器人已在位置5落子")
@@ -478,8 +512,8 @@ if __name__ == "__main__":
         # 为了匹配坐标，我们在裁剪后的图像上进行操作和显示
         cropped_frame = detector.pretreatment.crop(frame)
 
-        # 只有在非暂停状态下才更新棋盘
-        if time.time() >= pause_until:
+        # 只有在非暂停状态下且不等待机器人移动时才更新棋盘
+        if time.time() >= pause_until and not detector.waiting_for_robot_move:
             # 更新棋盘状态，这是核心处理步骤
             detector.update_board_state(cropped_frame)
 
@@ -491,6 +525,12 @@ if __name__ == "__main__":
             text = f"Paused: {remaining_time:.1f}s"
             (h, w) = display_frame.shape[:2]
             cv2.putText(display_frame, text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # 如果正在等待机器人移动，也显示提示信息
+        if detector.waiting_for_robot_move:
+            text = "Waiting for robot..."
+            (h, w) = display_frame.shape[:2]
+            cv2.putText(display_frame, text, (10, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         cv2.imshow("检测结果", display_frame)
 
